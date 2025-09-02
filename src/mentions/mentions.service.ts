@@ -97,7 +97,7 @@ export class MentionsService implements OnModuleInit {
   }
 
   // Poll every ~15s for new mentions and append immediately
-  @Interval(15000)
+  @Interval('mentions-poll', 15000)
   async pollNewMentions() {
     const disabled = this.config.get<string>('MENTIONS_POLL_ENABLED');
     if (disabled && disabled.toLowerCase() === 'false') return;
