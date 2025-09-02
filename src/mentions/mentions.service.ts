@@ -131,7 +131,7 @@ export class MentionsService implements OnModuleInit {
   }
 
   // Cron to run every hour and save to file
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronExpression.EVERY_HOUR, { name: 'mentions-cron' })
   async cronIndexMentions() {
     const enableCron = this.config.get<string>('MENTIONS_CRON_ENABLED');
     if (enableCron && enableCron.toLowerCase() === 'false') {
