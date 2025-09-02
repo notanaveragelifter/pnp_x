@@ -81,17 +81,3 @@ curl "http://localhost:3000/mentions?save=true"
 - Disable realtime: set `MENTIONS_POLL_ENABLED=false`.
 - Disable cron: set `MENTIONS_CRON_ENABLED=false`.
 
-### Git: first push (reference)
-
-```bash
-git init
-git add -A
-git commit -m "chore: initial commit with realtime mentions indexing (NestJS)"
-git branch -M main
-git remote add origin https://github.com/notanaveragelifter/pnp_x.git
-git push -u origin main
-```
-
-### License
-
-MIT
