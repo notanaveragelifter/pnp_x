@@ -3,12 +3,31 @@ import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression, Interval } from '@nestjs/schedule';
 import { TwitterApi, TweetV2 } from 'twitter-api-v2';
 import { FileStorageService } from '../shared/file-storage.service';
+import { SupabaseService } from '../shared/supabase.service';
 
 export interface MentionsFetchMeta {
   target_account: string;
   start_date: string;
   end_date: string;
   last_7_days: boolean;
+}
+
+// Derive market_pda for a stored tweet from its entities.urls
+// Returns the first matching PDA found (or null if none)
+// The tweet we store already has marketPDA on each url when available.
+// We still recompute here in case of shape differences.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function pickMarketPDAFromEntities(entities: any): string | null {
+  try {
+    const urls = entities?.urls || [];
+    for (const u of urls) {
+      if (u?.marketPDA) return String(u.marketPDA);
+      const candidate = u?.expanded_url || u?.url || u?.display_url;
+      const pda = extractMarketPDA(candidate);
+      if (pda) return pda;
+    }
+  } catch (_) {}
+  return null;
 }
 
 @Injectable()
@@ -20,6 +39,7 @@ export class MentionsService implements OnModuleInit {
     private readonly config: ConfigService,
     private readonly twitter: TwitterApi,
     private readonly fileStorage: FileStorageService,
+    private readonly supabase: SupabaseService,
   ) {}
 
   async onModuleInit() {
@@ -65,9 +85,12 @@ export class MentionsService implements OnModuleInit {
       tweets,
     };
 
-    if (save) {
-      const outputPath = this.config.get<string>('OUTPUT_PATH') || 'data/tweets.json';
-      await this.fileStorage.saveJson(outputPath, output);
+    if (save && tweets.length > 0) {
+      const rows = tweets.map((t) => ({
+        tweets_json: t,
+        market_pda: this.getMarketPDAFromTweet(t as any),
+      }));
+      await this.supabase.insertTwitterData(rows);
     }
 
     return output;
@@ -80,7 +103,6 @@ export class MentionsService implements OnModuleInit {
     if (disabled && disabled.toLowerCase() === 'false') return;
 
     const targetAccount = this.config.get<string>('TARGET_ACCOUNT') || 'predictandpump';
-    const outputPath = this.config.get<string>('OUTPUT_PATH') || 'data/tweets.json';
 
     try {
       const data = await this.searchMentions(targetAccount, undefined, undefined, this.sinceId);
@@ -93,14 +115,15 @@ export class MentionsService implements OnModuleInit {
         this.logger.log(`@${targetAccount} mentioned by user ${t.author_id} at ${t.created_at}: ${truncateText(String(t.text))}`);
       }
 
-      // Append to file with metadata update
-      await this.fileStorage.appendTweets(outputPath, chronological, {
-        target_account: targetAccount,
-        last_7_days: true,
-      });
+      // Insert into Supabase: each tweet as a row with tweets_json and market_pda
+      const rows = chronological.map((t) => ({
+        tweets_json: t,
+        market_pda: this.getMarketPDAFromTweet(t as any),
+      }));
+      await this.supabase.insertTwitterData(rows);
 
-      // Update since_id to the max id just seen
-      const maxId = newTweets.reduce((acc, t: any) => (acc && BigInt(acc) > BigInt(t.id) ? acc : String(t.id)), this.sinceId);
+      // Update since_id to the max id just seen among ALL fetched tweets (even if filtered out)
+      const maxId = data.maxSeenId || this.sinceId;
       if (maxId) this.sinceId = maxId;
     } catch (e) {
       this.logger.warn(`Polling mentions failed: ${e?.message || e}`);
@@ -129,14 +152,31 @@ export class MentionsService implements OnModuleInit {
     }
   }
 
+  // Check if a tweet contains a pnp.exchange/{marketPDA} link
+  private hasPnpMarketLink(tweet: Partial<TweetV2> & { entities?: any; text?: string }): boolean {
+    const re = /https?:\/\/(?:www\.)?pnp\.exchange\/[A-Za-z0-9][A-Za-z0-9-_]*/i;
+    const urls: string[] = (tweet as any)?.entities?.urls?.map((u: any) => u?.expanded_url || u?.url || u?.display_url || '').filter(Boolean) || [];
+    if (urls.some((u) => re.test(String(u)))) return true;
+    return hasPnpMarketUrlInText(tweet.text);
+  }
+
+  // Derive a single market_pda value from a tweet's entities
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private getMarketPDAFromTweet(tweet: any): string | null {
+    return pickMarketPDAFromEntities(tweet?.entities) || null;
+  }
+
   private async searchMentions(username: string, startDate?: Date, endDate?: Date, sinceId?: string) {
     const maxResults = 100; // max per page
-    const query = `@${username} -is:retweet`;
+    // Fetch only mentions of the target account; we'll further filter for pnp.exchange market links below.
+    // Adding has:links narrows API results and we still apply a strict URL filter.
+    const query = `@${username} has:links -is:retweet`;
 
     const startTime = startDate ? startDate.toISOString() : undefined;
     const endTime = endDate ? endDate.toISOString() : undefined;
 
     const tweets: Array<Partial<TweetV2> & { is_mention_of_target: boolean }> = [];
+    let maxSeenId: string | undefined = this.sinceId;
 
     try {
       const paginator = await this.twitter.v2.search(query, {
@@ -161,6 +201,31 @@ export class MentionsService implements OnModuleInit {
       });
 
       for await (const tweet of paginator) {
+        // Track max seen id regardless of filter match
+        try {
+          if (!maxSeenId || BigInt(tweet.id) > BigInt(maxSeenId)) {
+            maxSeenId = String(tweet.id);
+          }
+        } catch (_) {
+          // ignore BigInt parsing issues and fallback to last value
+          maxSeenId = String(tweet.id);
+        }
+
+        // Only keep tweets that contain a pnp.exchange/{marketPDA} style link
+        if (!this.hasPnpMarketLink(tweet)) continue;
+
+        // Clone and augment entities with derived marketPDA for pnp.exchange links
+        const augmentedEntities: any = tweet.entities
+          ? {
+              ...tweet.entities,
+              urls: (tweet.entities as any)?.urls?.map((u: any) => {
+                const urlCandidate = u?.expanded_url || u?.url || u?.display_url || '';
+                const marketPDA = extractMarketPDA(urlCandidate);
+                return marketPDA ? { ...u, marketPDA } : u;
+              }),
+            }
+          : undefined;
+
         tweets.push({
           id: tweet.id,
           text: tweet.text,
@@ -168,7 +233,7 @@ export class MentionsService implements OnModuleInit {
           author_id: tweet.author_id,
           conversation_id: tweet.conversation_id,
           public_metrics: tweet.public_metrics,
-          entities: tweet.entities,
+          entities: augmentedEntities,
           referenced_tweets: tweet.referenced_tweets,
           lang: tweet.lang,
           source: tweet.source,
@@ -186,11 +251,12 @@ export class MentionsService implements OnModuleInit {
       }
     }
 
-    return { tweets };
+    return { tweets, maxSeenId };
   }
 
   private async fetchLatestMentionId(username: string): Promise<string | undefined> {
     try {
+      // Prime using mentions so sinceId advances with the mentions stream
       const res = await this.twitter.v2.search(`@${username} -is:retweet`, {
         max_results: 10,
         'tweet.fields': ['id', 'created_at'],
@@ -207,3 +273,44 @@ export class MentionsService implements OnModuleInit {
 function truncateText(text: string, max = 180) {
   return text.length > max ? text.slice(0, max - 1) + '…' : text;
 }
+
+// Helper: check if a tweet contains a pnp.exchange/{marketPDA} link
+// Accepts links like:
+// - https://pnp.exchange/XXXXX
+// - http://pnp.exchange/XXXXX
+// where XXXXX is at least one URL-safe character (base58-like in practice)
+// We look in entities.urls first, then fallback to scanning the text.
+function normalizeString(s?: string): string {
+  return (s || '').trim();
+}
+
+function hasPnpMarketUrlInText(text?: string): boolean {
+  const t = normalizeString(text);
+  if (!t) return false;
+  const re = /https?:\/\/(?:www\.)?pnp\.exchange\/[A-Za-z0-9][A-Za-z0-9-_]*/i;
+  return re.test(t);
+}
+
+// Extract the market PDA from a pnp.exchange URL
+// Examples:
+//  - https://pnp.exchange/ABCDEFG => ABCDEFG
+//  - https://www.pnp.exchange/ABCDEFG?ref=1 => ABCDEFG
+//  - http://pnp.exchange/ABCDEFG/ => ABCDEFG
+function extractMarketPDA(rawUrl: string): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    // If it's a bare path like pnp.exchange/XXX in display_url, prepend protocol for parsing
+    const normalized = rawUrl.startsWith('http') ? rawUrl : `https://${rawUrl}`;
+    const u = new URL(normalized);
+    if (!/^(?:www\.)?pnp\.exchange$/i.test(u.hostname)) return undefined;
+    const path = u.pathname || '';
+    const seg = path.replace(/^\//, '').split('/')[0];
+    if (!seg) return undefined;
+    // Basic validation: first char alnum; allow A-Za-z0-9-_ thereafter
+    if (!/^[A-Za-z0-9][A-Za-z0-9-_]*$/.test(seg)) return undefined;
+    return seg;
+  } catch (_) {
+    return undefined;
+  }
+}
+

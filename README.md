@@ -1,98 +1,97 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+## pnp_x — Realtime X mentions indexer (NestJS)
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Fetches and indexes mentions of a target X/Twitter account in near real-time and saves them to JSON. Also supports a one-shot backfill of the last ~7 days via an API endpoint and an hourly cron snapshot.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+### Features
+- Realtime polling (~15s) for new mentions using Twitter v2 recent search.
+- Console logging of new mentions as they arrive.
+- Appends new mentions to JSON at `data/tweets.json`.
+- Backfill endpoint to fetch last ~7 days and optionally save a full snapshot.
+- Hourly cron snapshot (toggle via env).
 
-## Description
+### Requirements
+- Node.js 18+
+- Twitter API v2 Bearer Token
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+### Install
 
 ```bash
-$ npm install
+npm install
+npm install twitter-api-v2 @nestjs/config @nestjs/schedule
 ```
 
-## Compile and run the project
+### Configure environment
+Create `.env` (see `.env.example`):
+
+```
+TWITTER_BEARER_TOKEN=YOUR_BEARER_TOKEN
+TARGET_ACCOUNT=abc              # without @
+OUTPUT_PATH=data/tweets.json    # where JSON will be written/appended
+MENTIONS_CRON_ENABLED=true      # hourly snapshot
+MENTIONS_POLL_ENABLED=true      # realtime polling every ~15s
+```
+
+### Run
 
 ```bash
-# development
-$ npm run start
+# dev watch
+npm run start:dev
 
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+# or normal
+npm run start
 ```
 
-## Run tests
+On startup, the service primes the latest mention id and begins polling. New mentions are:
+- Logged to the console
+- Appended to `OUTPUT_PATH` (default `data/tweets.json`)
+
+### Backfill (last ~7 days)
+
+Trigger on demand via HTTP:
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+curl "http://localhost:3000/mentions?save=true"
 ```
 
-## Deployment
+- Returns a JSON payload with metadata and tweets.
+- If `save=true`, writes a full snapshot to `OUTPUT_PATH`.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+### Cron snapshot
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+- Enabled by `MENTIONS_CRON_ENABLED=true`.
+- Runs hourly and writes a fresh snapshot for the last ~7 days to `OUTPUT_PATH`.
+
+### API
+
+- `GET /mentions?save=true|false`
+  - Fetch last ~7 days and optionally save a snapshot.
+
+### File structure highlights
+
+- `src/mentions/mentions.service.ts` — realtime polling, cron, and search logic.
+- `src/mentions/mentions.controller.ts` — backfill endpoint.
+- `src/mentions/twitter.provider.ts` — provides configured Twitter client.
+- `src/shared/file-storage.service.ts` — JSON save/append helpers.
+- `src/app.module.ts` — wires `ConfigModule`, `ScheduleModule`, and `MentionsModule`.
+
+### Troubleshooting
+
+- No logs and no writes: ensure `.env` is set and `TWITTER_BEARER_TOKEN` is valid.
+- Only realtime, no history: call `GET /mentions?save=true` to backfill last ~7 days.
+- Disable realtime: set `MENTIONS_POLL_ENABLED=false`.
+- Disable cron: set `MENTIONS_CRON_ENABLED=false`.
+
+### Git: first push (reference)
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+git init
+git add -A
+git commit -m "chore: initial commit with realtime mentions indexing (NestJS)"
+git branch -M main
+git remote add origin https://github.com/notanaveragelifter/pnp_x.git
+git push -u origin main
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+### License
 
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+MIT
