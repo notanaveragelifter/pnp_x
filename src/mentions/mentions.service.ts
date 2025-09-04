@@ -61,9 +61,13 @@ export class MentionsService implements OnModuleInit {
   async fetchRecentMentions(save = false) {
     const targetAccount = this.config.get<string>('TARGET_ACCOUNT') || 'predictandpump';
 
-    // Compute last 7 days window
+    // Compute a window slightly less than 7 days to satisfy Twitter API limits
+    // Some tiers reject exactly 7d bounding windows; subtract a small buffer
     const endDate = new Date();
-    const startDate = new Date(endDate.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const bufferMs = 10 * 60 * 1000; // 10 minutes buffer
+    const windowMs = sevenDaysMs - bufferMs;
+    const startDate = new Date(endDate.getTime() - windowMs);
 
     this.validateCredentials();
 
@@ -96,8 +100,8 @@ export class MentionsService implements OnModuleInit {
     return output;
   }
 
-  // Poll every ~15s for new mentions and append immediately
-  @Interval('mentions-poll', 15000)
+  // Poll every ~3 minutes for new mentions and append immediately
+  @Interval('mentions-poll', 180000)
   async pollNewMentions() {
     const disabled = this.config.get<string>('MENTIONS_POLL_ENABLED');
     if (disabled && disabled.toLowerCase() === 'false') return;
